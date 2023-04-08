@@ -1,0 +1,1 @@
+/usr/bin/c++ -g CMakeFiles/redis.dir/src/HTable.cpp.o CMakeFiles/redis.dir/src/server.cpp.o -o redis 
