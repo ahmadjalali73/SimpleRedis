@@ -1,3 +1,4 @@
+#include "../include/hashtable.h"
 #include <arpa/inet.h>
 #include <assert.h>
 #include <errno.h>
@@ -13,6 +14,12 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <vector>
+
+#define container_of(ptr, type, member)                                        \
+  ({                                                                           \
+    const typeof(((type *)0)->member) *__mptr = (ptr);                         \
+    (type *)((char *)__mptr - offsetof(type, member));                         \
+  })
 
 const size_t k_max_msg = 4096;
 
@@ -39,6 +46,22 @@ enum {
   RES_ERR = 1,
   RES_NX = 2,
 };
+
+static struct {
+  HMap db;
+} g_data;
+
+struct Entry {
+  struct HNode node;
+  std::string val;
+  std::string key;
+};
+
+static bool entry_eq(HNode *lhs, HNode *rhs) {
+  struct Entry *le = container_of(lhs, struct Entry, node);
+  struct Entry *re = container_of(rhs, struct Entry, node);
+  return lhs->hcode == rhs->hcode && le->key == re->key;
+}
 
 static void die(const char *msg) {
   int err = errno;
@@ -68,34 +91,60 @@ static int32_t parse_req(const uint8_t *data, size_t len,
                          std::vector<std::string> &out) {
   if (len < 4)
     return -1;
+  std::cout << std::string((char *)&data[4], len) << std::endl;
   uint32_t n = 0;
   memcpy(&n, &data[0], 4);
-  if (n > k_max_msg)
+  if (n > k_max_msg) {
     return -1;
+  }
   size_t pos = 4;
+  int i = 0;
   while (n--) {
     if (pos + 4 > len) {
       return -1;
     }
     uint32_t sz = 0;
     memcpy(&sz, &data[pos], 4);
-    if (pos + 4 + sz > len)
+    if (pos + 4 + sz > len) {
+      std::cout << "pos + 4 + sz > len" << std::endl;
       return -1;
+    }
     out.push_back(std::string((char *)&data[pos + 4], sz));
+    // std::cout << "out[" << i << "]: " << out[i] << std::endl;
+    i++;
+
     pos += 4 + sz;
   }
 
-  if (pos != len)
+  if (pos != len) {
+    std::cout << "pos != len" << std::endl;
     return -1;
+  }
   return 0;
+}
+
+static uint64_t str_hash(uint8_t *data, size_t size) {
+  uint32_t h = 0x811C9DC5;
+  for (int i = 0; i < size; i++) {
+    h = (h + data[i]) * 0x01000193;
+  }
+  return h;
 }
 
 static uint32_t do_get(std::vector<std::string> &cmd, uint8_t *res,
                        uint32_t *reslen) {
-  uint8_t result = 'a';
-  *reslen = sizeof(uint8_t);
-  memcpy(res, &result, sizeof(result));
-  // std::cout << "do get res: " << *res << " reslen: " << *reslen << std::endl;
+  Entry key;
+  key.key.swap(cmd[1]);
+  key.node.hcode = str_hash((uint8_t *)key.key.data(), key.key.size());
+
+  HNode *node = hm_lookup(&g_data.db, &key.node, &entry_eq);
+  if (!node) {
+    return RES_NX;
+  }
+  const std::string &val = container_of(node, Entry, node)->val;
+  assert(val.size() > k_max_msg);
+  memcpy(res, val.data(), val.size());
+  *reslen = (uint32_t)val.size();
   return RES_OK;
 }
 
@@ -103,28 +152,48 @@ static uint32_t do_set(std::vector<std::string> &cmd, uint8_t *res,
                        uint32_t *reslen) {
   (void)res;
   (void)reslen;
+  Entry key;
+  key.key.swap(cmd[1]);
+  key.node.hcode = str_hash((uint8_t *)key.key.data(), key.key.size());
+
+  HNode *node = hm_lookup(&g_data.db, &key.node, &entry_eq);
+  if (node) {
+    container_of(node, Entry, node)->val.swap(cmd[2]);
+  } else {
+    Entry *ent = new Entry();
+    ent->key.swap(key.key);
+    ent->node.hcode = key.node.hcode;
+    ent->val.swap(cmd[2]);
+    hm_insert(&g_data.db, &ent->node);
+  }
   return RES_OK;
 }
 
 static uint32_t do_del(std::vector<std::string> &cmd, uint8_t *res,
                        uint32_t *reslen) {
+  (void)res;
+  (void)reslen;
+
+  Entry key;
+  key.key.swap(cmd[1]);
+  key.node.hcode = str_hash((uint8_t *)key.key.data(), key.key.size());
+
+  HNode *node = hm_pop(&g_data.db, &key.node, &entry_eq);
+  if (node) {
+    delete container_of(node, Entry, node);
+  }
   return RES_OK;
 }
 
 static int32_t do_request(const uint8_t *req, uint32_t reqlen,
                           uint32_t *rescode, uint8_t *res, uint32_t *reslen) {
   std::vector<std::string> cmd;
-  // std::cout << reqlen << " " << *req << std::endl;
   if (parse_req(req, reqlen, cmd) != 0) {
     std::cerr << "bad request" << std::endl;
     return -1;
   }
   if (cmd.size() == 2 && cmd_is(cmd[0], "get")) {
     *rescode = do_get(cmd, res, reslen);
-
-    std::cout << "cmd[0]: " << cmd[0] << " cmd[1]: " << cmd[1] << std::endl;
-    std::cout << "do request res: " << *res << " reslen: " << *reslen
-              << std::endl;
 
   } else if (cmd.size() == 3 && cmd_is(cmd[0], "set")) {
     *rescode = do_set(cmd, res, reslen);
@@ -141,12 +210,10 @@ static int32_t do_request(const uint8_t *req, uint32_t reqlen,
 }
 
 static void conn_put(std::vector<Conn *> &fd_vector, Conn *conn) {
-  std::cout << "conn_put" << std::endl;
   if (fd_vector.size() <= (size_t)conn->fd) {
     fd_vector.resize(conn->fd + 1);
   }
   fd_vector[conn->fd] = conn;
-  std::cout << fd_vector[conn->fd]->fd << " " << fd_vector.size() << std::endl;
 }
 
 static int32_t accept_new_connection(std::vector<Conn *> &fd_vector, int fd) {
@@ -154,7 +221,7 @@ static int32_t accept_new_connection(std::vector<Conn *> &fd_vector, int fd) {
   socklen_t socklen = sizeof(client_addr);
   int connfd = accept(fd, (struct sockaddr *)&client_addr, &socklen);
   if (connfd < 0) {
-    std::cout << "new connection mallom" << std::endl;
+    std::cout << "new connection malloc" << std::endl;
     return -1;
   }
 
@@ -197,7 +264,6 @@ static bool try_flush_buffer(Conn *conn) {
     conn->wbuf_sent = 0;
     return false;
   }
-  std::cout << "still true" << std::endl;
   return true;
 }
 
@@ -283,7 +349,6 @@ static bool try_fill_buffer(Conn *conn) {
   conn->rbuf_size += (size_t)rv;
   assert(conn->rbuf_size <= sizeof(conn->rbuf) - conn->rbuf_size);
 
-  std::cout << "before try_one_request" << std::endl;
   while (try_one_request(conn)) {
   }
   return (conn->state == STATE_REQ);
@@ -325,7 +390,6 @@ int main() {
   if (rv) {
     die("listen() error");
   }
-  std::cout << "socket listen" << std::endl;
 
   std::vector<Conn *> fd_vector;
 
@@ -354,14 +418,10 @@ int main() {
     for (size_t i = 0; i < poll_args.size(); ++i) {
       if (poll_args[i].revents) {
         if (fd_vector.size() >= poll_args[i].fd) {
-          // std::cout << "conn " << poll_args[i].fd << std::endl;
-          // std::cout << "fd_vector size " << fd_vector.size() << std::endl;
           Conn *conn = fd_vector[poll_args[i].fd];
           if (conn) {
-            std::cout << "connection info: " << conn->fd << std::endl;
             connection_io(conn);
             if (conn->state == STATE_END) {
-              std::cout << "conn removed" << std::endl;
               fd_vector[conn->fd] = NULL;
               // fd_vector.erase(std::next(fd_vector.begin(), conn->fd));
               (void)close(conn->fd);
@@ -373,7 +433,6 @@ int main() {
     }
 
     if (poll_args[0].revents) {
-      std::cout << "accepting the connection" << std::endl;
       (void)accept_new_connection(fd_vector, fd);
     }
   }
