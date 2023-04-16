@@ -142,7 +142,9 @@ static uint32_t do_get(std::vector<std::string> &cmd, uint8_t *res,
     return RES_NX;
   }
   const std::string &val = container_of(node, Entry, node)->val;
-  assert(val.size() > k_max_msg);
+  std::cout << "val.data: " << val.data() << " val.size: " << val.size()
+            << std::endl;
+  assert(val.size() <= k_max_msg);
   memcpy(res, val.data(), val.size());
   *reslen = (uint32_t)val.size();
   return RES_OK;
