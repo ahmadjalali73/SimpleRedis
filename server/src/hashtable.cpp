@@ -6,6 +6,14 @@
 const size_t k_max_load_factor = 8;
 const size_t k_resizing_work = 128;
 
+enum {
+  SER_NIL = 0,
+  SER_ERR = 1,
+  SER_STR = 2,
+  SER_INT = 3,
+  SER_ARR = 4,
+};
+
 static void h_init(HTab *htab, size_t size) {
   std::cout << "size: " << size << std::endl;
   assert(size > 0 && ((size - 1) & size) == 0);
@@ -103,6 +111,8 @@ HNode *hm_pop(HMap *hmap, HNode *key, bool (*cmp)(HNode *, HNode *)) {
     return h_detach(&hmap->ht2, from);
   return NULL;
 }
+
+size_t hm_size(HMap *hmap) { return hmap->ht1.size + hmap->ht2.size; }
 
 void hm_destroy(HMap *hmap) {
   assert(hmap->ht1.size + hmap->ht2.size == 0);
