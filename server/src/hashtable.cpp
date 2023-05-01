@@ -15,7 +15,6 @@ enum {
 };
 
 static void h_init(HTab *htab, size_t size) {
-  std::cout << "size: " << size << std::endl;
   assert(size > 0 && ((size - 1) & size) == 0);
   htab->tab = (HNode **)calloc(sizeof(HNode *), size);
   htab->mask = size - 1;
