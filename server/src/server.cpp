@@ -8,10 +8,13 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <fstream>
 #include <iostream>
 #include <math.h>
 #include <netinet/ip.h>
 #include <poll.h>
+#include <rapidjson/document.h>
+#include <rapidjson/filereadstream.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -697,6 +700,47 @@ static void process_timers() {
 }
 
 int main() {
+  std::string file_location("/etc/redis/config.json");
+  FILE *fp = fopen(file_location.c_str(), "rb");
+  if (!fp) {
+    die("Error: unable to open config file at /etc/redis/config.json");
+  }
+  char readBuffer[65536];
+
+  rapidjson::FileReadStream streamed_file(fp, readBuffer, sizeof(readBuffer));
+  rapidjson::Document document;
+  document.ParseStream(streamed_file);
+  if (document.HasParseError()) {
+    fclose(fp);
+    die("Error: failed to parse JSON document");
+  }
+  fclose(fp);
+  std::string ip;
+  uint16_t port = -1;
+  int num_threads = -1;
+
+  bool correct_config = true;
+
+  if (document.HasMember("ip") && document["ip"].IsString()) {
+    ip = document["ip"].GetString();
+  } else {
+    correct_config = false;
+  }
+  if (document.HasMember("port") && document["port"].IsInt()) {
+    port = (uint16_t)document["port"].GetInt();
+  } else {
+    correct_config = false;
+  }
+
+  if (document.HasMember("num_thread") && document["num_thread"].IsInt()) {
+    num_threads = document["num_thread"].GetInt();
+  } else {
+    correct_config = false;
+  }
+  if (!correct_config) {
+    die("your config has some problems!");
+  }
+
   dlist_init(&g_data.idle_list);
   int fd = socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0) {
@@ -706,8 +750,10 @@ int main() {
   setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
   struct sockaddr_in server_addr = {};
   server_addr.sin_family = AF_INET;
-  server_addr.sin_port = ntohs(1234);
-  server_addr.sin_addr.s_addr = ntohl(0);
+  server_addr.sin_port = ntohs(port);
+  if (inet_pton(AF_INET, ip.c_str(), &server_addr.sin_addr) != 1) {
+    die("wrong ip address in config file");
+  }
 
   int rv = bind(fd, (const sockaddr *)&server_addr, sizeof(server_addr));
   if (rv) {
@@ -721,7 +767,7 @@ int main() {
 
   fd_set_nb(fd);
 
-  thread_pool_init(&g_data.tp, 4);
+  thread_pool_init(&g_data.tp, num_threads);
 
   std::vector<struct pollfd> poll_args;
   while (true) {
