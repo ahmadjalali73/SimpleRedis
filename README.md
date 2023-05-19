@@ -7,7 +7,7 @@ https://build-your-own.org/
 
 I'm using codes of this book. there are only some minor changes in codes. but the real base is on this book.
 
-### things that have been added to code by me:
+### things that have been added to code by me
 1. config file: you can change IP address, port number and number of threads in server. we use a json file as config file in /etc/redis path. a sample config file is in directory of server. you should only copy it in /etc/redis/config.json.
 2. authentication: you cannot use any of the commands without authentication. for authentication you shoud run the client command with "auth" command. for example:
 ```
