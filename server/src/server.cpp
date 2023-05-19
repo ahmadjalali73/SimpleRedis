@@ -3,6 +3,7 @@
 #include "../include/heap.h"
 #include "../include/list.h"
 #include "../include/thread_pool.h"
+#include "../include/user.h"
 #include "../include/zset.h"
 #include <arpa/inet.h>
 #include <assert.h>
@@ -38,6 +39,7 @@ struct Conn {
   uint8_t wbuf[4 + k_max_msg];
   uint64_t idle_start = 0;
   DList idle_list;
+  User client;
 };
 
 enum {
@@ -57,10 +59,13 @@ enum {
   ERR_2BIG = 2,
   ERR_TYPE = 3,
   ERR_ARG = 4,
+  ERR_AUTH = 5,
 };
 
 static struct {
   HMap db;
+  HMap user_db;
+  HMap user_pass_db;
   std::vector<Conn *> fd2conn;
   DList idle_list;
   std::vector<HeapItem> heap;
@@ -81,10 +86,29 @@ struct Entry {
   size_t heap_idx = -1;
 };
 
+struct UserEntry {
+  struct HNode node;
+  User username;
+  ZSet *zset = NULL;
+  size_t heap_idx;
+};
+
 static bool entry_eq(HNode *lhs, HNode *rhs) {
   struct Entry *le = container_of(lhs, struct Entry, node);
   struct Entry *re = container_of(rhs, struct Entry, node);
   return lhs->hcode == rhs->hcode && le->key == re->key;
+}
+
+static bool user_entry_eq(HNode *lhs, HNode *rhs) {
+  struct Entry *le = container_of(lhs, struct Entry, node);
+  struct Entry *re = container_of(rhs, struct Entry, node);
+  return lhs->hcode == rhs->hcode && le->key == re->key && le->val == re->val;
+}
+
+static bool user_eq(HNode *lhs, HNode *rhs) {
+  struct UserEntry *le = container_of(lhs, struct UserEntry, node);
+  struct UserEntry *re = container_of(rhs, struct UserEntry, node);
+  return lhs->hcode == rhs->hcode && le->username == re->username;
 }
 
 static void die(const char *msg) {
@@ -194,7 +218,32 @@ static void out_update_arr(std::string &out, uint32_t n) {
   out.append((char *)&n, 4);
 }
 
-static void do_get(std::vector<std::string> &cmd, std::string &out) {
+static bool is_auth(User &client) {
+  UserEntry new_user;
+  new_user.username.set_ip(client.get_ip());
+  new_user.node.hcode = int_hash(new_user.username.get_ip());
+
+  HNode *node = hm_lookup(&g_data.user_db, &new_user.node, &user_eq);
+  if (node) {
+    UserEntry *uent = container_of(node, UserEntry, node);
+    uint64_t now = get_monotonic_usec();
+    if (uent->username.is_auth_yet(now)) {
+      uent->username.update_time();
+      return true;
+    } else {
+      return false;
+    }
+  } else {
+    return false;
+  }
+}
+
+static void do_get(std::vector<std::string> &cmd, std::string &out,
+                   User &client) {
+  if (!is_auth(client)) {
+    return out_err(out, ERR_AUTH, "you are not authenticated");
+  }
+
   Entry key;
   key.key.swap(cmd[1]);
   key.node.hcode = str_hash((uint8_t *)key.key.data(), key.key.size());
@@ -209,7 +258,11 @@ static void do_get(std::vector<std::string> &cmd, std::string &out) {
   return out_str(out, ent->val);
 }
 
-static void do_set(std::vector<std::string> &cmd, std::string &out) {
+static void do_set(std::vector<std::string> &cmd, std::string &out,
+                   User &client) {
+  if (!is_auth(client)) {
+    return out_err(out, ERR_AUTH, "you are not authenticated");
+  }
   Entry key;
   key.key.swap(cmd[1]);
   key.node.hcode = str_hash((uint8_t *)key.key.data(), key.key.size());
@@ -279,7 +332,11 @@ static void entry_del(Entry *ent) {
   }
 }
 
-static void do_del(std::vector<std::string> &cmd, std::string &out) {
+static void do_del(std::vector<std::string> &cmd, std::string &out,
+                   User &client) {
+  if (!is_auth(client)) {
+    return out_err(out, ERR_AUTH, "you are not authenticated");
+  }
   Entry key;
   key.key.swap(cmd[1]);
   key.node.hcode = str_hash((uint8_t *)key.key.data(), key.key.size());
@@ -308,7 +365,11 @@ static void cb_scan(HNode *node, void *arg) {
   out_str(out, container_of(node, Entry, node)->key);
 }
 
-static void do_keys(std::vector<std::string> &cmd, std::string &out) {
+static void do_keys(std::vector<std::string> &cmd, std::string &out,
+                    User &client) {
+  if (!is_auth(client)) {
+    return out_err(out, ERR_AUTH, "you are not authenticated");
+  }
   (void)cmd;
   out_arr(out, (uint32_t)hm_size(&g_data.db));
   h_scan(&g_data.db.ht1, &cb_scan, &out);
@@ -327,7 +388,11 @@ static bool str2int(const std::string &s, int64_t &out) {
   return endp == s.c_str() + s.size();
 }
 
-static void do_expire(std::vector<std::string> &cmd, std::string &out) {
+static void do_expire(std::vector<std::string> &cmd, std::string &out,
+                      User &client) {
+  if (!is_auth(client)) {
+    return out_err(out, ERR_AUTH, "you are not authenticated");
+  }
   int64_t ttl_ms = 0;
   if (!str2int(cmd[2], ttl_ms)) {
     return out_err(out, ERR_ARG, "expect int 64");
@@ -344,7 +409,11 @@ static void do_expire(std::vector<std::string> &cmd, std::string &out) {
   }
 }
 
-static void do_ttl(std::vector<std::string> &cmd, std::string &out) {
+static void do_ttl(std::vector<std::string> &cmd, std::string &out,
+                   User &client) {
+  if (!is_auth(client)) {
+    return out_err(out, ERR_AUTH, "you are not authenticated");
+  }
   Entry key;
   key.key.swap(cmd[1]);
   key.node.hcode = str_hash((uint8_t *)key.key.data(), key.key.size());
@@ -360,7 +429,11 @@ static void do_ttl(std::vector<std::string> &cmd, std::string &out) {
   return out_int(out, expire_at > now_us ? (expire_at - now_us) / 1000 : 0);
 }
 
-static void do_zadd(std::vector<std::string> &cmd, std::string &out) {
+static void do_zadd(std::vector<std::string> &cmd, std::string &out,
+                    User &client) {
+  if (!is_auth(client)) {
+    return out_err(out, ERR_AUTH, "you are not authenticated");
+  }
   double score = 0;
   if (!str2dbl(cmd[2], score))
     return out_err(out, ERR_ARG, "expect fp number");
@@ -405,7 +478,11 @@ static bool expect_zset(std::string &out, std::string &s, Entry **ent) {
   return true;
 }
 
-static void do_zrem(std::vector<std::string> &cmd, std::string &out) {
+static void do_zrem(std::vector<std::string> &cmd, std::string &out,
+                    User &client) {
+  if (!is_auth(client)) {
+    return out_err(out, ERR_AUTH, "you are not authenticated");
+  }
   Entry *ent = NULL;
   if (!expect_zset(out, cmd[1], &ent))
     return;
@@ -417,7 +494,11 @@ static void do_zrem(std::vector<std::string> &cmd, std::string &out) {
   return out_int(out, znode ? 1 : 0);
 }
 
-static void do_zscore(std::vector<std::string> &cmd, std::string &out) {
+static void do_zscore(std::vector<std::string> &cmd, std::string &out,
+                      User &client) {
+  if (!is_auth(client)) {
+    return out_err(out, ERR_AUTH, "you are not authenticated");
+  }
   Entry *ent = NULL;
   if (!expect_zset(out, cmd[1], &ent))
     return;
@@ -426,7 +507,11 @@ static void do_zscore(std::vector<std::string> &cmd, std::string &out) {
   return znode ? out_dbl(out, znode->score) : out_nil(out);
 }
 
-static void do_zquery(std::vector<std::string> &cmd, std::string &out) {
+static void do_zquery(std::vector<std::string> &cmd, std::string &out,
+                      User &client) {
+  if (!is_auth(client)) {
+    return out_err(out, ERR_AUTH, "you are not authenticated");
+  }
   double score = 0;
   if (str2dbl(cmd[2], score))
     return out_err(out, ERR_ARG, "expect fp number");
@@ -461,27 +546,62 @@ static void do_zquery(std::vector<std::string> &cmd, std::string &out) {
   return out_update_arr(out, n);
 }
 
-static void do_request(std::vector<std::string> &cmd, std::string &out) {
+static void do_auth(std::vector<std::string> &cmd, std::string &out,
+                    User &client) {
+  Entry key;
+  key.key.swap(cmd[1]);
+  key.val.swap(cmd[2]);
+  key.node.hcode = str_hash((uint8_t *)key.key.data(), key.key.size());
+  HNode *node_auth = hm_lookup(&g_data.user_pass_db, &key.node, &user_entry_eq);
+  if (!node_auth) {
+    return out_err(out, ERR_AUTH, "wrong authentication");
+  }
+
+  // Entry *new_key = container_of(node_auth, Entry, node);
+  // if()
+
+  UserEntry new_user;
+  new_user.username.set_ip(client.get_ip());
+  new_user.node.hcode = int_hash(new_user.username.get_ip());
+
+  HNode *node = hm_lookup(&g_data.user_db, &new_user.node, &user_eq);
+  if (node) {
+    UserEntry *uent = container_of(node, UserEntry, node);
+    uent->username.update_time();
+  } else {
+    UserEntry *uent = new UserEntry();
+    uent->username.set_ip(new_user.username.get_ip());
+    uent->node.hcode = new_user.node.hcode;
+    hm_insert(&g_data.user_db, &uent->node);
+  }
+  // out = "successfull authentication";
+  out_nil(out);
+}
+
+static void do_request(std::vector<std::string> &cmd, std::string &out,
+                       User &client) {
   if (cmd.size() == 1 && cmd_is(cmd[0], "keys")) {
-    do_keys(cmd, out);
+    do_keys(cmd, out, client);
   } else if (cmd.size() == 2 & cmd_is(cmd[0], "get")) {
-    do_get(cmd, out);
+    do_get(cmd, out, client);
   } else if (cmd.size() == 3 && cmd_is(cmd[0], "set")) {
-    do_set(cmd, out);
+    do_set(cmd, out, client);
   } else if (cmd.size() == 2 && cmd_is(cmd[0], "del")) {
-    do_del(cmd, out);
+    do_del(cmd, out, client);
   } else if (cmd.size() == 3 && cmd_is(cmd[0], "pexpire")) {
-    do_expire(cmd, out);
+    do_expire(cmd, out, client);
   } else if (cmd.size() == 2 && cmd_is(cmd[0], "pttl")) {
-    do_ttl(cmd, out);
+    do_ttl(cmd, out, client);
   } else if (cmd.size() == 4 && cmd_is(cmd[0], "zadd")) {
-    do_zadd(cmd, out);
+    do_zadd(cmd, out, client);
   } else if (cmd.size() == 3 && cmd_is(cmd[0], "zrem")) {
-    do_zrem(cmd, out);
+    do_zrem(cmd, out, client);
   } else if (cmd.size() == 3 && cmd_is(cmd[0], "zscore")) {
-    do_zscore(cmd, out);
+    do_zscore(cmd, out, client);
   } else if (cmd.size() == 6 && cmd_is(cmd[0], "zquery")) {
-    do_zquery(cmd, out);
+    do_zquery(cmd, out, client);
+  } else if (cmd.size() == 3 && cmd_is(cmd[0], "auth")) {
+    do_auth(cmd, out, client);
   } else {
     out_err(out, ERR_UNKNOWN, "Unkown command");
   }
@@ -510,12 +630,14 @@ static int32_t accept_new_connection(int fd) {
     close(connfd);
     return -1;
   }
+
   new_conn->fd = connfd;
   new_conn->state = STATE_REQ;
   new_conn->rbuf_size = 0;
   new_conn->wbuf_size = 0;
   new_conn->wbuf_sent = 0;
   new_conn->idle_start = get_monotonic_usec();
+  new_conn->client.set_ip(client_addr.sin_addr.s_addr);
   dlist_insert_before(&g_data.idle_list, &new_conn->idle_list);
   conn_put(g_data.fd2conn, new_conn);
   return 0;
@@ -576,7 +698,7 @@ static bool try_one_request(Conn *conn) {
   }
 
   std::string out;
-  do_request(cmd, out);
+  do_request(cmd, out, conn->client);
 
   if (4 + out.size() > k_max_msg) {
     out.clear();
@@ -699,7 +821,23 @@ static void process_timers() {
   }
 }
 
+static void insert_user_pass() {
+  Entry *ahmad = new Entry();
+  Entry *abbas = new Entry();
+
+  ahmad->key = "ahmad";
+  ahmad->val = "123";
+  ahmad->node.hcode = str_hash((uint8_t *)ahmad->key.data(), ahmad->key.size());
+  abbas->key = "abbas";
+  abbas->node.hcode = str_hash((uint8_t *)abbas->key.data(), abbas->key.size());
+  abbas->val = "123";
+
+  hm_insert(&g_data.user_pass_db, &ahmad->node);
+  hm_insert(&g_data.user_pass_db, &abbas->node);
+}
+
 int main() {
+  insert_user_pass();
   std::string file_location("/etc/redis/config.json");
   FILE *fp = fopen(file_location.c_str(), "rb");
   if (!fp) {

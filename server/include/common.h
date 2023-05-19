@@ -17,6 +17,12 @@ inline uint64_t str_hash(const uint8_t *data, size_t len) {
   return h;
 }
 
+inline uint64_t int_hash(const uint32_t ip) {
+  uint32_t h = 0x811C9DC5;
+  h = (h + ip) * 0x01000193;
+  return h;
+}
+
 enum {
   SER_NIL = 0,
   SER_ERR = 1,
