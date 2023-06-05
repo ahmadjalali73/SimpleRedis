@@ -18,8 +18,14 @@ for now, you can authenticate with two users.
 | :--------: | :--------: |
 | ahmad | 123 |
 | abbas | 123 |
+
+
 but in future, it will change and clients will be available from file.
 authentication here means authentication for IP address. In other words, your IP address is your representor. If you do not work for five  minutes, your authentication will be expired and you should authenticate again.
+
+
+3. take a snapshot: you can use write command to take a snapshot of all keys inside your table. this command gets a path and write the table on a file in server machine. if your given file is not existed, an error will be raised and inform client that the file does not exists. otherwise, it will write all the keys and their values in csv form.
+
 
 ## Compile by source
 the server only has one pre-request for build and it is rapid-json. rapidjson is a famous library in c++ for parsing json files.

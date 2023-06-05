@@ -60,6 +60,7 @@ enum {
   ERR_TYPE = 3,
   ERR_ARG = 4,
   ERR_AUTH = 5,
+  ERR_FILE = 6,
 };
 
 static struct {
@@ -578,6 +579,57 @@ static void do_auth(std::vector<std::string> &cmd, std::string &out,
   out_nil(out);
 }
 
+static void w_scan(HTab *tab, void (*f)(HNode *, void *), void *arg,
+                   std::string path) {
+  if (tab->size == 0)
+    return;
+  for (size_t i = 0; i < tab->mask + 1; ++i) {
+    HNode *node = tab->tab[i];
+    while (node) {
+      f(node, arg);
+      node = node->next;
+    }
+  }
+}
+
+static void write_to_file(std::string key, std::string value,
+                          std::ofstream &out_file) {
+  out_file << key << "," << value << std::endl;
+}
+
+static void h_scan(HTab *tab, std::ofstream &out_file) {
+  for (size_t i; i < tab->mask + 1; ++i) {
+    HNode *node = tab->tab[i];
+    while (node) {
+      Entry *ent = container_of(node, Entry, node);
+      // std::cout << ent->key << std::endl;
+      write_to_file(ent->key, ent->val, out_file);
+      node = node->next;
+    }
+  }
+}
+
+static void do_write(std::vector<std::string> &cmd, std::string &out,
+                     User &client) {
+  if (!is_auth(client)) {
+    return out_err(out, ERR_AUTH, "you are not authenticated");
+  }
+
+  std::string path(cmd[1]);
+  std::ofstream out_file;
+  out_file.open(path);
+  if (out_file.fail()) {
+    out_err(out, ERR_FILE, "Could not open file");
+    return;
+  }
+
+  h_scan(&g_data.db.ht1, out_file);
+  h_scan(&g_data.db.ht2, out_file);
+
+  out_file.close();
+  out_arr(out, (uint32_t)hm_size(&g_data.db));
+}
+
 static void do_request(std::vector<std::string> &cmd, std::string &out,
                        User &client) {
   if (cmd.size() == 1 && cmd_is(cmd[0], "keys")) {
@@ -602,6 +654,8 @@ static void do_request(std::vector<std::string> &cmd, std::string &out,
     do_zquery(cmd, out, client);
   } else if (cmd.size() == 3 && cmd_is(cmd[0], "auth")) {
     do_auth(cmd, out, client);
+  } else if (cmd.size() == 2 && cmd_is(cmd[0], "write")) {
+    do_write(cmd, out, client);
   } else {
     out_err(out, ERR_UNKNOWN, "Unkown command");
   }
